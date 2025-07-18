@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.pytest_cache/
+htmlcov/
+.nox/
+.mypy_cache/
+.dmypy.json
+.vscode/
+.idea/
+
+# Editor/OS specific
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+ehthumbs.db
+
+# FastAPI and Streamlit specific
+# Database files (if using SQLite or similar)
+*.db
+*.sqlite3
+
+# Log files
+*.log
+
+# Environment variables
+.env
+.env.*
+!/.env.example # Keep .env.example if you provide one
+
+# Uploaded files or generated data
+/uploads/
+/data/
+/models/ # If models are large and trained locally, consider ignoring them
+/dist/
+/build/
+
+# IDE-specific files for PyCharm, VS Code, etc.
+.idea/
+.vscode/
+*.iml
+
+# Streamlit specific
+.streamlit/
