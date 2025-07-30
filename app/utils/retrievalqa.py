@@ -1,16 +1,21 @@
-# app/utils/retrievalqa_improved.py - CON GENERADOR LLM DE RECETAS
+# app/utils/retrievalqa_improved.py - CORREGIDO PARA NUEVA IMPLEMENTACIÓN
 
 from typing import Dict, List, Optional, Tuple
 import logging
+import numpy as np
+
+# IMPORTACIONES CORREGIDAS - usar la nueva implementación
 from .vector_store import (
-    buscar_plan_nutricional_completo,
-    verificar_sistema_rag,
-    inicializar_sistema_rag
+    buscar_plan_nutricional_sin_template,  # Función principal corregida
+    inicializar_sistema_rag_mejorado,      # Nueva función de inicialización
+    limpiar_cache_busquedas,               # Para obtener variedad
+    verificar_diversidad_sistema           # Para verificar funcionamiento
 )
+
 from .llm_generator import (
     generar_explicacion,
     generar_consejos_nutricionales,
-    generar_recetas_peruanas_con_llm  # Nueva función
+    generar_recetas_peruanas_con_llm  # Para fallback LLM
 )
 from .clinic_rules import calcular_get, distribuir_calorias
 
@@ -18,25 +23,38 @@ from .clinic_rules import calcular_get, distribuir_calorias
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class NutritionalPlanner:
+class NutritionalPlannerFixed:
+    """Planificador nutricional corregido que usa el sistema RAG mejorado."""
+
     def __init__(self):
-        # Inicializar sistema RAG al crear el planner
+        self.sistema_inicializado = False
+        self.ultimo_resultado_rag = None
         self._inicializar_rag()
 
     def _inicializar_rag(self):
-        """Inicializa el sistema RAG si no está listo."""
+        """Inicializa el sistema RAG mejorado."""
         try:
-            estado = verificar_sistema_rag()
-            if not estado["sistema_inicializado"]:
-                logger.info("🔄 Inicializando sistema RAG...")
-                if inicializar_sistema_rag():
-                    logger.info("✅ Sistema RAG inicializado correctamente")
+            logger.info("🚀 Inicializando sistema RAG mejorado...")
+
+            # Usar la nueva función de inicialización
+            if inicializar_sistema_rag_mejorado():
+                self.sistema_inicializado = True
+                logger.info("✅ Sistema RAG mejorado inicializado correctamente")
+
+                # Verificar diversidad del sistema
+                verificacion = verificar_diversidad_sistema()
+                if verificacion.get("sistema_funcionando", False):
+                    logger.info("✅ Sistema de diversidad funcionando correctamente")
                 else:
-                    logger.warning("⚠️ No se pudo inicializar sistema RAG, usando métodos fallback")
+                    logger.warning("⚠️ Sistema de diversidad necesita atención")
+
             else:
-                logger.info("✅ Sistema RAG ya inicializado")
+                logger.warning("⚠️ No se pudo inicializar sistema RAG, usando métodos fallback")
+                self.sistema_inicializado = False
+
         except Exception as e:
-            logger.warning(f"⚠️ Error inicializando RAG: {e}")
+            logger.error(f"❌ Error inicializando RAG: {e}")
+            self.sistema_inicializado = False
 
     def _normalizar_sexo(self, sexo: str) -> str:
         """Normaliza el sexo a formato de una letra (M/F)."""
@@ -98,153 +116,330 @@ class NutritionalPlanner:
 
         return True, "Perfil válido"
 
-    def _obtener_recomendaciones_rag_con_llm_fallback(self, condicion: str) -> Dict:
+    def _obtener_recomendaciones_rag_mejorado(self, condicion: str, forzar_diversidad: bool = False) -> Dict:
         """
-        Obtiene recomendaciones usando RAG y si no hay recetas, las genera con LLM.
+        Obtiene recomendaciones usando el sistema RAG mejorado sin templates.
         """
         try:
-            logger.info(f"🔍 Obteniendo recomendaciones RAG para: {condicion}")
+            logger.info(f"🔍 Obteniendo recomendaciones RAG mejorado para: {condicion}")
 
-            # Intentar usar sistema RAG completo
-            recomendacion_completa = buscar_plan_nutricional_completo(condicion)
+            # Si queremos forzar diversidad, limpiar cache
+            if forzar_diversidad:
+                logger.info("🧹 Limpiando cache para obtener diversidad")
+                limpiar_cache_busquedas()
+
+            # Verificar que el sistema esté inicializado
+            if not self.sistema_inicializado:
+                logger.warning("⚠️ Sistema RAG no inicializado, reintentando...")
+                self._inicializar_rag()
+
+            if not self.sistema_inicializado:
+                logger.error("❌ Sistema RAG no disponible")
+                return None
+
+            # Usar la nueva función principal sin templates
+            recomendacion_completa = buscar_plan_nutricional_sin_template(condicion)
 
             if "error" in recomendacion_completa:
                 logger.warning(f"⚠️ Error en sistema RAG: {recomendacion_completa['error']}")
                 return None
 
-            # Verificar si tenemos recetas
-            recetas_rag = recomendacion_completa.get("recetas_recomendadas", {}).get("lista", [])
+            # Verificar calidad de resultados
             alimentos_rag = recomendacion_completa.get("alimentos_recomendados", {}).get("lista", [])
+            recetas_rag = recomendacion_completa.get("recetas_recomendadas", {}).get("lista", [])
 
-            logger.info(f"📊 RAG inicial: {len(alimentos_rag)} alimentos, {len(recetas_rag)} recetas")
+            logger.info(f"📊 RAG mejorado: {len(alimentos_rag)} alimentos, {len(recetas_rag)} recetas")
 
-            # Si no hay recetas pero sí alimentos, generar recetas con LLM
-            if len(recetas_rag) == 0 and len(alimentos_rag) > 0:
-                logger.info("🤖 No hay recetas en vectorstore, generando con LLM...")
+            # Verificar diversidad
+            diversidad_alimentos = recomendacion_completa.get("alimentos_recomendados", {}).get("diversidad", {})
+            diversidad_recetas = recomendacion_completa.get("recetas_recomendadas", {}).get("diversidad", {})
 
-                nombres_alimentos = [a.get("nombre", "") for a in alimentos_rag]
-                recetas_generadas_llm = generar_recetas_peruanas_con_llm(
-                    alimentos_recomendados=nombres_alimentos,
-                    condicion=condicion,
-                    num_recetas=6
-                )
+            score_diversidad_alimentos = diversidad_alimentos.get("score_diversidad", 0)
+            score_diversidad_recetas = diversidad_recetas.get("score_diversidad", 0)
 
-                if recetas_generadas_llm:
-                    # Actualizar la recomendación con las recetas generadas
-                    recomendacion_completa["recetas_recomendadas"]["lista"] = recetas_generadas_llm
-                    recomendacion_completa["recetas_recomendadas"]["total_encontradas"] = len(recetas_generadas_llm)
-                    recomendacion_completa["recetas_generadas_por_llm"] = True
+            logger.info(f"🌈 Diversidad - Alimentos: {score_diversidad_alimentos}, Recetas: {score_diversidad_recetas}")
 
-                    logger.info(f"✅ Generadas {len(recetas_generadas_llm)} recetas con LLM")
-                else:
-                    logger.warning("⚠️ No se pudieron generar recetas con LLM")
+            # Almacenar último resultado para análisis
+            self.ultimo_resultado_rag = recomendacion_completa
 
             return recomendacion_completa
 
         except Exception as e:
-            logger.error(f"❌ Error obteniendo recomendaciones: {e}")
+            logger.error(f"❌ Error obteniendo recomendaciones RAG: {e}")
             return None
 
-    def _convertir_recetas_rag_a_formato_compatible(self, recetas_rag: List[Dict]) -> List[Dict]:
-        """Convierte las recetas del formato RAG al formato esperado por el código existente."""
-        recetas_convertidas = []
+    def _complementar_con_llm_si_necesario(self, recomendacion_rag: Dict, condicion: str) -> Dict:
+        """
+        Complementa las recomendaciones RAG con recetas LLM si es necesario.
+        """
+        try:
+            recetas_rag = recomendacion_rag.get("recetas_recomendadas", {}).get("lista", [])
+            alimentos_rag = recomendacion_rag.get("alimentos_recomendados", {}).get("lista", [])
 
-        for receta in recetas_rag:
-            receta_convertida = {
-                "nombre": receta.get("nombre", ""),
-                "energia_kcal": float(receta.get("energia_kcal", 0)),
-                "proteinas_g": float(receta.get("proteinas_g", 0)),
-                "hierro_mg": float(receta.get("hierro_mg", 0)),
-                "condicion_principal": receta.get("condicion_principal", "general"),
-                "alimentos_identificados": receta.get("alimentos_identificados", ""),
-                "ingredientes": receta.get("ingredientes_originales", receta.get("ingredientes", "")),
-                "preparacion": receta.get("preparacion_original", receta.get("preparacion", "")),
-                "relevance_score": receta.get("relevance_score", 0),
-                "num_alimentos_nutritivos": receta.get("num_alimentos_nutritivos", 0),
-                "generada_por_llm": receta.get("generada_por_llm", False),
-                "tiempo_preparacion": receta.get("tiempo_preparacion", "30 minutos"),
-                "porciones": receta.get("porciones", 4),
-                "beneficios_nutricionales": receta.get("beneficios_nutricionales", "")
-            }
-            recetas_convertidas.append(receta_convertida)
+            # Determinar si necesitamos más recetas
+            necesita_complemento = len(recetas_rag) < 6
 
-        return recetas_convertidas
+            if necesita_complemento:
+                logger.info(f"🤖 Complementando con LLM: solo {len(recetas_rag)} recetas encontradas")
 
-    def _filtrar_recetas_inteligente_mejorado(self, recetas: List[dict], condicion: str, calorias_objetivo: int) -> List[dict]:
-        """Filtrado inteligente mejorado que considera el score del RAG y recetas generadas por LLM."""
+                # Extraer nombres de alimentos para LLM
+                nombres_alimentos = [a.get("nombre", "") for a in alimentos_rag[:5]]
 
-        def calcular_score_total(receta):
-            score = 0
+                try:
+                    # Generar recetas adicionales con LLM
+                    recetas_llm = generar_recetas_peruanas_con_llm(
+                        nombres_alimentos,
+                        condicion,
+                        num_recetas=4
+                    )
 
-            # Score del sistema RAG (si está disponible)
-            score_rag = receta.get("relevance_score", 0)
-            score += score_rag * 2  # Dar más peso al score del RAG
+                    if recetas_llm:
+                        logger.info(f"✅ LLM generó {len(recetas_llm)} recetas adicionales")
 
-            # Bonus para recetas generadas por LLM (están hechas específicamente)
+                        # Combinar recetas RAG con recetas LLM
+                        recetas_combinadas = recetas_rag.copy()
+
+                        for receta_llm in recetas_llm:
+                            # Marcar como generada por LLM
+                            receta_llm["generada_por_llm"] = True
+                            receta_llm["relevance_score"] = receta_llm.get("relevance_score", 5.0)
+                            recetas_combinadas.append(receta_llm)
+
+                        # Actualizar la recomendación
+                        recomendacion_rag["recetas_recomendadas"]["lista"] = recetas_combinadas
+                        recomendacion_rag["recetas_recomendadas"]["total_encontradas"] = len(recetas_combinadas)
+                        recomendacion_rag["recetas_generadas_por_llm"] = True
+                        recomendacion_rag["num_recetas_llm"] = len(recetas_llm)
+
+                        logger.info(f"🔄 Total después de complemento: {len(recetas_combinadas)} recetas")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Error complementando con LLM: {e}")
+
+            return recomendacion_rag
+
+        except Exception as e:
+            logger.error(f"❌ Error en complemento LLM: {e}")
+            return recomendacion_rag
+
+    def _convertir_formato_rag_mejorado(self, recomendacion_rag: Dict) -> Tuple[List[Dict], List[str]]:
+        """
+        Convierte el formato del RAG mejorado al formato esperado por el resto del código.
+        """
+        try:
+            # Extraer recetas
+            recetas_rag = recomendacion_rag.get("recetas_recomendadas", {}).get("lista", [])
+            alimentos_rag = recomendacion_rag.get("alimentos_recomendados", {}).get("lista", [])
+
+            # Convertir recetas al formato esperado
+            recetas_convertidas = []
+
+            for receta in recetas_rag:
+                receta_convertida = {
+                    "nombre": receta.get("nombre", ""),
+                    "energia_kcal": float(receta.get("energia_kcal", 0)),
+                    "proteinas_g": float(receta.get("proteinas_g", 0)),
+                    "hierro_mg": float(receta.get("hierro_mg", 0)),
+                    "hierro_total": float(receta.get("hierro_total", receta.get("hierro_mg", 0))),
+                    "proteinas_total": float(receta.get("proteinas_total", receta.get("proteinas_g", 0))),
+                    "condiciones_apropiadas": receta.get("condiciones_apropiadas", ""),
+                    "alimentos_identificados": receta.get("alimentos_identificados", ""),
+                    "ingredientes": receta.get("ingredientes_originales", receta.get("ingredientes", "")),
+                    "preparacion": receta.get("preparacion_original", receta.get("preparacion", "")),
+                    "relevance_score": float(receta.get("relevance_score", 0)),
+                    "num_alimentos_nutritivos": int(receta.get("num_alimentos_nutritivos", 0)),
+                    "tipo_preparacion": receta.get("tipo_preparacion", "mixto"),
+                    "dificultad": receta.get("dificultad", "intermedio"),
+                    "tiempo_estimado": receta.get("tiempo_estimado", "30-45 min"),
+                    "generada_por_llm": bool(receta.get("generada_por_llm", False)),
+
+                    # Campos adicionales para compatibilidad
+                    "tiempo_preparacion": receta.get("tiempo_estimado", "30-45 min"),
+                    "porciones": int(receta.get("porciones", 4)),
+                    "beneficios_nutricionales": receta.get("beneficios_nutricionales", "")
+                }
+
+                recetas_convertidas.append(receta_convertida)
+
+            # Extraer nombres de alimentos
+            nombres_alimentos = [a.get("nombre", "") for a in alimentos_rag]
+
+            logger.info(f"✅ Convertido: {len(recetas_convertidas)} recetas, {len(nombres_alimentos)} alimentos")
+
+            return recetas_convertidas, nombres_alimentos
+
+        except Exception as e:
+            logger.error(f"❌ Error convirtiendo formato RAG: {e}")
+            return [], []
+
+    def _calcular_score_total_mejorado(self, receta: Dict, condicion: str) -> float:
+        """
+        Calcula score total mejorado que considera tanto RAG como características específicas.
+        """
+        score = 0.0
+
+        try:
+            # 1. Score del sistema RAG (peso alto)
+            score_rag = float(receta.get("relevance_score", 0))
+            score += score_rag * 3.0  # Dar mucho peso al score del RAG
+
+            # 2. Score por valores nutricionales totales (considerando ingredientes)
+            if condicion.lower() == "anemia":
+                hierro_total = float(receta.get("hierro_total", receta.get("hierro_mg", 0)))
+                proteinas_total = float(receta.get("proteinas_total", receta.get("proteinas_g", 0)))
+
+                if hierro_total >= 8.0:
+                    score += 15.0
+                elif hierro_total >= 5.0:
+                    score += 12.0
+                elif hierro_total >= 3.0:
+                    score += 8.0
+                elif hierro_total >= 1.0:
+                    score += 4.0
+
+                if proteinas_total >= 25.0:
+                    score += 10.0
+                elif proteinas_total >= 15.0:
+                    score += 6.0
+                elif proteinas_total >= 10.0:
+                    score += 3.0
+
+            elif condicion.lower() == "sobrepeso":
+                energia = float(receta.get("energia_kcal", 0))
+
+                if energia <= 300:
+                    score += 15.0
+                elif energia <= 500:
+                    score += 10.0
+                elif energia <= 700:
+                    score += 5.0
+                else:
+                    score -= 3.0  # Penalizar muy altas calorías
+
+            # 3. Score por diversidad de alimentos nutritivos
+            num_alimentos = int(receta.get("num_alimentos_nutritivos", 0))
+            score += min(num_alimentos * 2.0, 10.0)  # Máximo 10 puntos
+
+            # 4. Score por condiciones apropiadas
+            condiciones_apropiadas = receta.get("condiciones_apropiadas", "").lower()
+            if condicion.lower() in condiciones_apropiadas:
+                score += 8.0
+            elif "general" in condiciones_apropiadas:
+                score += 3.0
+
+            # 5. Bonus por recetas generadas por LLM (están específicamente diseñadas)
             if receta.get("generada_por_llm", False):
-                score += 15.0  # Bonus alto para recetas LLM
+                score += 5.0
 
-            # Score por condición específica (lógica original)
-            if condicion == "anemia":
-                hierro = receta.get("hierro_mg", 0)
-                if hierro >= 5:
-                    score += 10
-                elif hierro >= 3:
-                    score += 7
-                elif hierro >= 1:
-                    score += 3
-            elif condicion == "sobrepeso":
-                calorias = receta.get("energia_kcal", 0)
-                if calorias <= 400:
-                    score += 10
-                elif calorias <= 600:
-                    score += 7
-                elif calorias <= 800:
-                    score += 3
+            # 6. Score por tipo de preparación (preferir métodos saludables)
+            tipo_prep = receta.get("tipo_preparacion", "").lower()
+            if tipo_prep in ["cocido", "al_vapor", "guisado"]:
+                score += 3.0
+            elif tipo_prep in ["salteado", "horneado"]:
+                score += 2.0
+            elif tipo_prep == "frito":
+                score -= 2.0  # Penalizar frituras
 
-            # Score por alimentos nutritivos identificados
-            num_alimentos = receta.get("num_alimentos_nutritivos", 0)
-            score += num_alimentos * 1.5
+        except Exception as e:
+            logger.warning(f"Error calculando score para {receta.get('nombre', 'unknown')}: {e}")
 
-            # Score por variedad nutricional
-            proteinas = receta.get("proteinas_g", 0)
-            if proteinas >= 20:
-                score += 5
-            elif proteinas >= 10:
-                score += 3
+        return round(score, 2)
 
-            return score
+    def _filtrar_recetas_inteligente_rag(self, recetas: List[Dict], condicion: str, calorias_objetivo: int) -> List[Dict]:
+        """
+        Filtrado inteligente específico para el sistema RAG mejorado.
+        """
+        if not recetas:
+            return []
 
-        # Calcular scores y ordenar
-        recetas_con_score = [(r, calcular_score_total(r)) for r in recetas]
+        logger.info(f"🔍 Filtrando {len(recetas)} recetas para {condicion}")
+
+        # Calcular scores para todas las recetas
+        recetas_con_score = []
+
+        for receta in recetas:
+            score = self._calcular_score_total_mejorado(receta, condicion)
+            recetas_con_score.append((receta, score))
+
+        # Ordenar por score descendente
         recetas_con_score.sort(key=lambda x: x[1], reverse=True)
 
-        # Filtro principal - ser más flexible con recetas LLM
+        # Aplicar filtros específicos por condición
         recetas_filtradas = []
 
         for receta, score in recetas_con_score:
-            # Si es generada por LLM, es automáticamente válida
-            if receta.get("generada_por_llm", False):
+            incluir = False
+
+            # Criterios específicos por condición
+            if condicion.lower() == "anemia":
+                hierro_total = float(receta.get("hierro_total", receta.get("hierro_mg", 0)))
+                # Ser más permisivo con recetas LLM o con buen score
+                if (receta.get("generada_por_llm", False) or
+                    hierro_total >= 1.0 or
+                    score >= 8.0):
+                    incluir = True
+
+            elif condicion.lower() == "sobrepeso":
+                energia = float(receta.get("energia_kcal", 0))
+                # Permitir recetas LLM o con energía controlada
+                if (receta.get("generada_por_llm", False) or
+                    energia <= 800 or
+                    score >= 8.0):
+                    incluir = True
+
+            else:  # general y otros
+                # Para condiciones generales, ser más permisivo
+                if score >= 5.0:
+                    incluir = True
+
+            if incluir:
                 recetas_filtradas.append(receta)
-            # Si no, aplicar filtros tradicionales
-            elif condicion == "anemia":
-                if receta.get("hierro_mg", 0) >= 1.0 or score >= 5.0:
-                    recetas_filtradas.append(receta)
-            elif condicion == "sobrepeso":
-                if receta.get("energia_kcal", 0) <= 800 or score >= 5.0:
-                    recetas_filtradas.append(receta)
-            else:
-                recetas_filtradas.append(receta)
 
-        # Asegurar mínimo de recetas
-        if len(recetas_filtradas) < 4:
-            logger.warning(f"Pocas recetas filtradas para {condicion}, tomando top por score")
-            recetas_filtradas = [r for r, s in recetas_con_score[:8]]
+        # Asegurar diversidad de tipos de preparación
+        recetas_diversas = self._asegurar_diversidad_preparacion(recetas_filtradas)
 
-        return recetas_filtradas[:8]  # Top 8 recetas
+        # Limitar a 8 recetas máximo
+        resultado_final = recetas_diversas[:8]
 
-    def _distribuir_menu_por_tiempo(self, recetas: List[dict], distribucion: dict) -> dict:
-        """Distribuye las recetas por tiempo de comida según sus calorías."""
+        logger.info(f"✅ Filtradas: {len(resultado_final)} recetas finales")
+
+        # Log de estadísticas
+        recetas_llm = len([r for r in resultado_final if r.get("generada_por_llm", False)])
+        if recetas_llm > 0:
+            logger.info(f"🤖 Incluye {recetas_llm} recetas generadas por LLM")
+
+        return resultado_final
+
+    def _asegurar_diversidad_preparacion(self, recetas: List[Dict]) -> List[Dict]:
+        """
+        Asegura diversidad en los tipos de preparación.
+        """
+        if len(recetas) <= 6:
+            return recetas
+
+        diversas = []
+        tipos_usados = set()
+
+        # Primera pasada: una de cada tipo
+        for receta in recetas:
+            tipo = receta.get("tipo_preparacion", "mixto")
+            if tipo not in tipos_usados:
+                diversas.append(receta)
+                tipos_usados.add(tipo)
+
+        # Segunda pasada: completar con las mejores
+        for receta in recetas:
+            if len(diversas) >= 8:
+                break
+            if receta not in diversas:
+                diversas.append(receta)
+
+        return diversas
+
+    def _distribuir_menu_por_tiempo_mejorado(self, recetas: List[Dict], distribucion: Dict) -> Dict:
+        """
+        Distribución mejorada que considera el tipo de preparación y horarios apropiados.
+        """
         menu_distribuido = {
             "desayuno": [],
             "almuerzo": [],
@@ -252,32 +447,67 @@ class NutritionalPlanner:
             "refrigerio": []
         }
 
-        # Clasificar recetas por calorías
-        recetas_ligeras = [r for r in recetas if r.get("energia_kcal", 0) <= 300]
-        recetas_medianas = [r for r in recetas if 300 < r.get("energia_kcal", 0) <= 600]
-        recetas_completas = [r for r in recetas if r.get("energia_kcal", 0) > 600]
+        if not recetas:
+            return menu_distribuido
 
-        # Asignar por tiempo de comida
+        # Clasificar recetas por energía y tipo
+        recetas_ligeras = []      # <= 350 kcal
+        recetas_medianas = []     # 350-600 kcal
+        recetas_completas = []    # > 600 kcal
+
+        for receta in recetas:
+            energia = receta.get("energia_kcal", 0)
+            tipo_prep = receta.get("tipo_preparacion", "")
+
+            if energia <= 350:
+                recetas_ligeras.append(receta)
+            elif energia <= 600:
+                recetas_medianas.append(receta)
+            else:
+                recetas_completas.append(receta)
+
+        # Asignar por horarios
+
+        # Desayuno: preferir ligeras o medianas
+        candidatos_desayuno = recetas_ligeras + recetas_medianas
+        if candidatos_desayuno:
+            menu_distribuido["desayuno"] = [candidatos_desayuno[0]["nombre"]]
+
+        # Almuerzo: preferir completas o medianas
+        candidatos_almuerzo = recetas_completas + recetas_medianas
+        if candidatos_almuerzo:
+            # Evitar repetir la del desayuno
+            for candidato in candidatos_almuerzo:
+                if candidato["nombre"] not in menu_distribuido["desayuno"]:
+                    menu_distribuido["almuerzo"] = [candidato["nombre"]]
+                    break
+
+        # Cena: medianas o ligeras
+        candidatos_cena = recetas_medianas + recetas_ligeras
+        if candidatos_cena:
+            for candidato in candidatos_cena:
+                if (candidato["nombre"] not in menu_distribuido["desayuno"] and
+                    candidato["nombre"] not in menu_distribuido["almuerzo"]):
+                    menu_distribuido["cena"] = [candidato["nombre"]]
+                    break
+
+        # Refrigerio: ligeras
         if recetas_ligeras:
-            menu_distribuido["refrigerio"] = [recetas_ligeras[0]["nombre"]]
-            if len(recetas_ligeras) > 1:
-                menu_distribuido["desayuno"] = [recetas_ligeras[1]["nombre"]]
-
-        if recetas_completas:
-            menu_distribuido["almuerzo"] = [recetas_completas[0]["nombre"]]
-            if len(recetas_completas) > 1:
-                menu_distribuido["cena"] = [recetas_completas[1]["nombre"]]
-
-        if recetas_medianas:
-            if not menu_distribuido["desayuno"]:
-                menu_distribuido["desayuno"] = [recetas_medianas[0]["nombre"]]
-            elif not menu_distribuido["cena"]:
-                menu_distribuido["cena"] = [recetas_medianas[0]["nombre"]]
+            for candidato in recetas_ligeras:
+                if candidato["nombre"] not in [
+                    menu_distribuido["desayuno"],
+                    menu_distribuido["almuerzo"],
+                    menu_distribuido["cena"]
+                ]:
+                    menu_distribuido["refrigerio"] = [candidato["nombre"]]
+                    break
 
         return menu_distribuido
 
     def generar_plan(self, perfil: dict) -> dict:
-        """Genera un plan nutricional personalizado usando RAG mejorado con LLM fallback."""
+        """
+        Genera un plan nutricional usando el sistema RAG mejorado sin templates.
+        """
 
         # 1. Validar entrada
         es_valido, mensaje = self.validar_perfil(perfil)
@@ -297,66 +527,72 @@ class NutritionalPlanner:
 
         condicion_principal = condiciones[0].lower()
 
-        logger.info(f"Generando plan para: {edad} años, {sexo} ({sexo_original}), condición: {condicion_principal}")
+        logger.info(f"🎯 Generando plan para: {edad} años, {sexo} ({sexo_original}), condición: {condicion_principal}")
 
         try:
             # 3. Cálculos nutricionales básicos
             get = calcular_get(edad, sexo)
             distribucion = distribuir_calorias(get)
 
-            # 4. Obtener recomendaciones usando sistema RAG + LLM fallback
-            recomendacion_rag = self._obtener_recomendaciones_rag_con_llm_fallback(condicion_principal)
+            # 4. Obtener recomendaciones del sistema RAG mejorado
+            logger.info("🔍 Consultando sistema RAG mejorado...")
+
+            recomendacion_rag = self._obtener_recomendaciones_rag_mejorado(condicion_principal)
 
             if recomendacion_rag:
-                # Usar recomendaciones del sistema híbrido RAG + LLM
-                logger.info("🎯 Usando recomendaciones del sistema RAG + LLM")
+                logger.info("✅ Sistema RAG mejorado respondió correctamente")
 
-                recetas_rag = recomendacion_rag["recetas_recomendadas"]["lista"]
-                alimentos_rag = recomendacion_rag["alimentos_recomendados"]["lista"]
+                # 5. Complementar con LLM si es necesario
+                recomendacion_completa = self._complementar_con_llm_si_necesario(
+                    recomendacion_rag, condicion_principal
+                )
 
-                # Convertir formato para compatibilidad
-                recetas_encontradas = self._convertir_recetas_rag_a_formato_compatible(recetas_rag)
-                alimentos_recomendados = [a["nombre"] for a in alimentos_rag]
+                # 6. Convertir formato
+                recetas_encontradas, alimentos_recomendados = self._convertir_formato_rag_mejorado(
+                    recomendacion_completa
+                )
 
                 # Información adicional del análisis RAG
-                analisis_nutricional = recomendacion_rag.get("analisis_nutricional", {})
-                coincidencias_alimentos = recomendacion_rag.get("match_alimentos_recetas", {})
-                recetas_generadas_llm = recomendacion_rag.get("recetas_generadas_por_llm", False)
+                analisis_nutricional = recomendacion_completa.get("analisis_nutricional", {})
+                coincidencias_alimentos = recomendacion_completa.get("match_alimentos_recetas", {})
+                recomendaciones_adicionales = recomendacion_completa.get("recomendaciones_adicionales", {})
+                tiene_recetas_llm = recomendacion_completa.get("recetas_generadas_por_llm", False)
 
-                logger.info(f"✅ Sistema híbrido proporcionó {len(recetas_encontradas)} recetas y {len(alimentos_recomendados)} alimentos")
-                if recetas_generadas_llm:
+                logger.info(f"📊 Datos procesados: {len(recetas_encontradas)} recetas, {len(alimentos_recomendados)} alimentos")
+                if tiene_recetas_llm:
                     logger.info("🤖 Incluye recetas generadas por LLM")
 
             else:
-                # Fallback completo a métodos tradicionales
-                logger.warning("⚠️ Usando métodos fallback completos")
-                recetas_encontradas = self._buscar_recetas_fallback(condiciones)
+                # Fallback completo
+                logger.warning("⚠️ Sistema RAG no disponible, usando fallback completo")
+                recetas_encontradas = self._buscar_recetas_fallback_completo(condicion_principal)
                 alimentos_recomendados = self._obtener_alimentos_fallback(condiciones)
                 analisis_nutricional = {}
                 coincidencias_alimentos = {}
-                recetas_generadas_llm = False
+                recomendaciones_adicionales = {}
+                tiene_recetas_llm = True  # En fallback, todas son LLM
 
             # Verificar que tenemos recetas
             if not recetas_encontradas:
                 return {
-                    "error": "No se pudieron generar recetas para la condición especificada. Contacte soporte técnico."
+                    "error": "No se pudieron generar recetas para la condición especificada. El sistema necesita datos adicionales."
                 }
 
-            # 5. Filtrado inteligente con el nuevo sistema
-            recetas_filtradas = self._filtrar_recetas_inteligente_mejorado(
+            # 7. Filtrado inteligente específico para RAG
+            recetas_filtradas = self._filtrar_recetas_inteligente_rag(
                 recetas_encontradas,
                 condicion_principal,
                 get
             )
 
-            # 6. Distribuir menú por horarios
-            menu_distribuido = self._distribuir_menu_por_tiempo(recetas_filtradas, distribucion)
+            # 8. Distribuir menú por horarios mejorado
+            menu_distribuido = self._distribuir_menu_por_tiempo_mejorado(recetas_filtradas, distribucion)
 
-            # 7. Preparar datos para el LLM
+            # 9. Preparar datos para LLM (explicación)
             nombres_recetas = [r["nombre"] for r in recetas_filtradas[:4]]
             condiciones_str = ", ".join(condiciones)
 
-            # Crear perfil enriquecido con información nutricional
+            # Crear perfil enriquecido
             perfil_str = (
                 f"Adolescente de {edad} años, sexo {sexo_original}, peso {peso}, altura {altura}. "
                 f"Diagnóstico: {condiciones_str}. "
@@ -364,31 +600,28 @@ class NutritionalPlanner:
                 f"Alimentos clave recomendados: {', '.join(alimentos_recomendados[:5])}. "
             )
 
-            # Agregar información del análisis nutricional si está disponible
-            if analisis_nutricional:
-                hierro_promedio = analisis_nutricional.get("promedio_hierro_mg", 0)
-                energia_promedio = analisis_nutricional.get("promedio_energia_kcal", 0)
-                perfil_str += f"Los alimentos recomendados aportan en promedio {hierro_promedio} mg de hierro y {energia_promedio} kcal por 100g."
+            # Agregar información nutricional si disponible
+            if analisis_nutricional and "alimentos" in analisis_nutricional:
+                info_alimentos = analisis_nutricional["alimentos"]
+                hierro_promedio = info_alimentos.get("promedio_hierro_mg", 0)
+                energia_promedio = info_alimentos.get("promedio_energia_kcal", 0)
+                perfil_str += f"Los alimentos recomendados aportan en promedio {hierro_promedio} mg de hierro y {energia_promedio} kcal por 100g. "
 
-            # 8. Generar explicación con LLM
+            # 10. Generar explicación con LLM
             try:
-                # Incluir información sobre recetas generadas por IA
                 recetas_info = ", ".join(nombres_recetas)
-                if recetas_generadas_llm:
-                    recetas_info += " (algunas recetas fueron creadas específicamente para este perfil nutricional)"
+                if tiene_recetas_llm:
+                    recetas_info += " (incluye recetas creadas específicamente para este perfil nutricional)"
 
-                explicacion = generar_explicacion(
-                    perfil_str,
-                    recetas_info,
-                    max_tokens=400
-                )
+                explicacion = generar_explicacion(perfil_str, recetas_info, max_tokens=400)
                 consejos = generar_consejos_nutricionales(perfil_str, max_tokens=250)
+
             except Exception as e:
-                logger.warning(f"Error generando explicación con LLM: {e}")
+                logger.warning(f"⚠️ Error generando explicación con LLM: {e}")
                 explicacion = self._generar_explicacion_fallback(condicion_principal, nombres_recetas)
                 consejos = self._generar_consejos_fallback(condicion_principal)
 
-            # 9. Preparar respuesta final enriquecida
+            # 11. Preparar respuesta final enriquecida
             plan_final = {
                 "perfil": {
                     "edad": edad,
@@ -407,53 +640,83 @@ class NutritionalPlanner:
                 "explicacion_profesional": explicacion,
                 "consejos_adicionales": consejos,
 
-                # Información enriquecida del sistema RAG
+                # Información enriquecida del sistema RAG mejorado
                 "alimentos_tabla_nutricional": [
                     {
-                        "nombre": a["nombre"],
-                        "hierro_mg": a.get("hierro_mg", 0),
-                        "energia_kcal": a.get("energia_kcal", 0),
-                        "proteinas_g": a.get("proteinas_g", 0)
+                        "nombre": a.get("nombre", ""),
+                        "hierro_mg": float(a.get("hierro_mg", 0)),
+                        "energia_kcal": float(a.get("energia_kcal", 0)),
+                        "proteinas_g": float(a.get("proteinas_g", 0)),
+                        "calcio_mg": float(a.get("calcio_mg", 0)),
+                        "fibra_g": float(a.get("fibra_g", 0)),
+                        "grupo_alimento": a.get("grupo_alimento", "otros"),
+                        "indice_nutricional": float(a.get("indice_nutricional", 0))
                     }
                     for a in (recomendacion_rag.get("alimentos_recomendados", {}).get("lista", []) if recomendacion_rag else [])
-                ][:5],
+                ][:6],
 
+                # Análisis nutricional detallado del sistema RAG
                 "analisis_nutricional_detallado": analisis_nutricional,
                 "coincidencias_ingredientes": coincidencias_alimentos,
+                "recomendaciones_adicionales": recomendaciones_adicionales,
 
+                # Recetas con información completa del RAG
                 "recetas_detalladas": [
                     {
                         "nombre": r["nombre"],
-                        "energia_kcal": r.get("energia_kcal", 0),
-                        "hierro_mg": r.get("hierro_mg", 0),
-                        "proteinas_g": r.get("proteinas_g", 0),
+                        "energia_kcal": float(r.get("energia_kcal", 0)),
+                        "hierro_mg": float(r.get("hierro_mg", 0)),
+                        "hierro_total": float(r.get("hierro_total", r.get("hierro_mg", 0))),
+                        "proteinas_g": float(r.get("proteinas_g", 0)),
+                        "proteinas_total": float(r.get("proteinas_total", r.get("proteinas_g", 0))),
+                        "condiciones_apropiadas": r.get("condiciones_apropiadas", ""),
                         "alimentos_identificados": r.get("alimentos_identificados", ""),
-                        "score_relevancia": r.get("relevance_score", 0),
-                        "ingredientes": r.get("ingredientes", "")[:300] + "..." if len(r.get("ingredientes", "")) > 300 else r.get("ingredientes", ""),
-                        "preparacion": r.get("preparacion", "")[:300] + "..." if len(r.get("preparacion", "")) > 300 else r.get("preparacion", ""),
-                        "tiempo_preparacion": r.get("tiempo_preparacion", "30 minutos"),
-                        "porciones": r.get("porciones", 4),
+                        "score_relevancia": float(r.get("relevance_score", 0)),
+                        "tipo_preparacion": r.get("tipo_preparacion", "mixto"),
+                        "dificultad": r.get("dificultad", "intermedio"),
+                        "tiempo_estimado": r.get("tiempo_estimado", "30-45 min"),
+                        "num_alimentos_nutritivos": int(r.get("num_alimentos_nutritivos", 0)),
+
+                        # Información de la receta
+                        "ingredientes": self._truncar_texto(r.get("ingredientes", ""), 400),
+                        "preparacion": self._truncar_texto(r.get("preparacion", ""), 400),
+                        "porciones": int(r.get("porciones", 4)),
                         "beneficios_nutricionales": r.get("beneficios_nutricionales", ""),
-                        "generada_por_ia": r.get("generada_por_llm", False)
+
+                        # Metadata del sistema
+                        "generada_por_ia": bool(r.get("generada_por_llm", False)),
+                        "query_origen": r.get("query_origen", ""),
+                        "sistema_origen": "RAG_mejorado" if not r.get("generada_por_llm", False) else "LLM_complemento"
                     }
-                    for r in recetas_filtradas[:4]
+                    for r in recetas_filtradas[:6]
                 ],
 
-                # Métricas del sistema
+                # Métricas del sistema mejorado
                 "metricas_sistema": {
+                    "version_sistema": "RAG_mejorado_v2",
                     "total_recetas_analizadas": len(recetas_encontradas),
                     "recetas_seleccionadas": len(recetas_filtradas),
                     "total_alimentos_recomendados": len(alimentos_recomendados),
                     "sistema_rag_usado": recomendacion_rag is not None,
-                    "recetas_generadas_por_ia": recetas_generadas_llm,
-                    "porcentaje_coincidencia_ingredientes": coincidencias_alimentos.get("porcentaje_coincidencia", 0) if coincidencias_alimentos else 0,
-                    "recetas_ia_count": len([r for r in recetas_filtradas if r.get("generada_por_llm", False)])
+                    "recetas_generadas_por_ia": tiene_recetas_llm,
+                    "recetas_ia_count": len([r for r in recetas_filtradas if r.get("generada_por_llm", False)]),
+                    "porcentaje_coincidencia_ingredientes": float(coincidencias_alimentos.get("porcentaje_coincidencia", 0)) if coincidencias_alimentos else 0,
+                    "diversidad_alimentos": (recomendacion_rag.get("alimentos_recomendados", {}).get("diversidad", {}).get("score_diversidad", 0) if recomendacion_rag else 0),
+                    "diversidad_recetas": (recomendacion_rag.get("recetas_recomendadas", {}).get("diversidad", {}).get("score_diversidad", 0) if recomendacion_rag else 0),
+                    "calidad_match": coincidencias_alimentos.get("calidad_match", "moderada") if coincidencias_alimentos else "no_disponible"
                 }
             }
 
-            logger.info(f"✅ Plan generado exitosamente: {len(nombres_recetas)} recetas, {len(alimentos_recomendados)} alimentos")
-            if recetas_generadas_llm:
-                logger.info(f"🤖 Incluye {plan_final['metricas_sistema']['recetas_ia_count']} recetas generadas por IA")
+            # Log de métricas finales
+            metricas = plan_final["metricas_sistema"]
+            logger.info(f"✅ Plan generado exitosamente:")
+            logger.info(f"   - {metricas['recetas_seleccionadas']} recetas finales")
+            logger.info(f"   - {metricas['total_alimentos_recomendados']} alimentos recomendados")
+            logger.info(f"   - Diversidad alimentos: {metricas['diversidad_alimentos']}")
+            logger.info(f"   - Diversidad recetas: {metricas['diversidad_recetas']}")
+
+            if metricas['recetas_generadas_por_ia']:
+                logger.info(f"   - {metricas['recetas_ia_count']} recetas generadas por IA")
 
             return plan_final
 
@@ -461,111 +724,319 @@ class NutritionalPlanner:
             logger.error(f"❌ Error generando plan: {e}")
             return {
                 "error": f"Error interno al generar el plan: {str(e)}",
-                "perfil_recibido": perfil
+                "perfil_recibido": perfil,
+                "sistema_rag_disponible": self.sistema_inicializado
             }
 
-    def _buscar_recetas_fallback(self, condiciones: List[str]) -> List[Dict]:
-        """Método fallback para buscar recetas si el sistema RAG falla completamente."""
-        # En caso extremo, usar el generador LLM directamente
-        condicion_principal = condiciones[0].lower() if condiciones else "general"
+    def _truncar_texto(self, texto: str, max_length: int) -> str:
+        """Trunca texto manteniendo palabras completas."""
+        if not texto or len(texto) <= max_length:
+            return texto
 
-        # Alimentos básicos según condición
+        truncado = texto[:max_length]
+        ultimo_espacio = truncado.rfind(' ')
+
+        if ultimo_espacio > max_length * 0.8:  # Si el último espacio está en el último 20%
+            return truncado[:ultimo_espacio] + "..."
+        else:
+            return truncado + "..."
+
+    def _buscar_recetas_fallback_completo(self, condicion: str) -> List[Dict]:
+        """Fallback completo usando solo LLM cuando el sistema RAG falla."""
+        logger.warning(f"🔄 Activando fallback completo para {condicion}")
+
+        # Alimentos básicos según condición para el LLM
         alimentos_basicos = {
-            "anemia": ["pescado", "quinua", "lentejas", "espinaca", "hígado"],
-            "sobrepeso": ["verduras", "frutas", "pescado magro", "cereales integrales"],
-            "general": ["pescado", "quinua", "verduras", "frutas", "legumbres"]
+            "anemia": ["pescado", "quinua", "lentejas", "espinaca", "hígado", "anchoveta"],
+            "sobrepeso": ["verduras", "frutas", "pescado magro", "cereales integrales", "ensaladas"],
+            "diabetes": ["verduras", "pescado", "quinua", "legumbres", "cereales integrales"],
+            "general": ["pescado", "quinua", "verduras", "frutas", "legumbres", "cereales"]
         }
 
-        alimentos_para_condicion = alimentos_basicos.get(condicion_principal, alimentos_basicos["general"])
+        alimentos_para_condicion = alimentos_basicos.get(condicion, alimentos_basicos["general"])
 
         try:
-            from .llm_generator import generar_recetas_peruanas_con_llm
-            recetas_llm = generar_recetas_peruanas_con_llm(alimentos_para_condicion, condicion_principal, 4)
-            if recetas_llm:
-                logger.info("✅ Fallback completo: usando solo recetas LLM")
-                return recetas_llm
-        except Exception as e:
-            logger.warning(f"⚠️ Error en fallback LLM: {e}")
+            # Intentar generar recetas con LLM
+            recetas_llm = generar_recetas_peruanas_con_llm(
+                alimentos_para_condicion,
+                condicion,
+                num_recetas=6
+            )
 
-        # Fallback final: recetas hardcodeadas
-        return self._recetas_hardcoded_fallback(condicion_principal)
+            if recetas_llm:
+                logger.info(f"✅ Fallback LLM generó {len(recetas_llm)} recetas")
+                # Marcar todas como generadas por LLM
+                for receta in recetas_llm:
+                    receta["generada_por_llm"] = True
+                    receta["relevance_score"] = 7.0  # Score alto para recetas específicas
+                    receta["sistema_origen"] = "LLM_fallback"
+
+                return recetas_llm
+            else:
+                logger.warning("⚠️ LLM fallback no generó recetas")
+
+        except Exception as e:
+            logger.error(f"❌ Error en fallback LLM: {e}")
+
+        # Fallback final: recetas hardcoded
+        return self._recetas_hardcoded_fallback(condicion)
 
     def _recetas_hardcoded_fallback(self, condicion: str) -> List[Dict]:
-        """Último fallback: recetas básicas hardcodeadas."""
-        recetas_basicas = [
+        """Recetas hardcoded como último recurso."""
+        logger.warning("🔄 Usando recetas hardcoded de emergencia")
+
+        recetas_emergencia = {
+            "anemia": [
+                {
+                    "nombre": "Pescado a la plancha con quinua",
+                    "energia_kcal": 350,
+                    "hierro_mg": 4.5,
+                    "proteinas_g": 25,
+                    "ingredientes": "Pescado fresco, quinua, verduras",
+                    "preparacion": "Cocinar pescado a la plancha, hervir quinua, acompañar con verduras",
+                    "generada_por_llm": False,
+                    "relevance_score": 6.0,
+                    "tipo_preparacion": "plancha"
+                },
+                {
+                    "nombre": "Lentejas guisadas con espinaca",
+                    "energia_kcal": 280,
+                    "hierro_mg": 3.8,
+                    "proteinas_g": 18,
+                    "ingredientes": "Lentejas, espinaca, cebolla, ajo",
+                    "preparacion": "Guisar lentejas con verduras y espinaca fresca",
+                    "generada_por_llm": False,
+                    "relevance_score": 5.5,
+                    "tipo_preparacion": "guisado"
+                }
+            ],
+            "sobrepeso": [
+                {
+                    "nombre": "Ensalada de verduras con atún",
+                    "energia_kcal": 220,
+                    "hierro_mg": 2.0,
+                    "proteinas_g": 20,
+                    "ingredientes": "Verduras mixtas, atún, limón",
+                    "preparacion": "Mezclar verduras frescas con atún en agua",
+                    "generada_por_llm": False,
+                    "relevance_score": 5.0,
+                    "tipo_preparacion": "crudo"
+                },
+                {
+                    "nombre": "Sopa de verduras con quinua",
+                    "energia_kcal": 180,
+                    "hierro_mg": 1.5,
+                    "proteinas_g": 8,
+                    "ingredientes": "Verduras variadas, quinua, caldo",
+                    "preparacion": "Hervir verduras con quinua en caldo ligero",
+                    "generada_por_llm": False,
+                    "relevance_score": 4.5,
+                    "tipo_preparacion": "cocido"
+                }
+            ]
+        }
+
+        recetas_default = [
             {
-                "nombre": "Pescado con Quinua Tradicional",
-                "energia_kcal": 420,
-                "proteinas_g": 25,
-                "hierro_mg": 3.5,
-                "ingredientes": "pescado fresco, quinua, verduras, especias peruanas",
-                "preparacion": "Cocinar quinua, preparar pescado con especias tradicionales, servir con verduras",
-                "generada_por_llm": False
-            },
-            {
-                "nombre": "Lentejas Guisadas Peruanas",
-                "energia_kcal": 280,
-                "proteinas_g": 18,
-                "hierro_mg": 4.2,
-                "ingredientes": "lentejas, verduras, ají amarillo, especias",
-                "preparacion": "Guisar lentejas con sofrito peruano tradicional",
-                "generada_por_llm": False
+                "nombre": "Pescado con verduras al vapor",
+                "energia_kcal": 300,
+                "hierro_mg": 3.0,
+                "proteinas_g": 22,
+                "ingredientes": "Pescado, verduras mixtas",
+                "preparacion": "Cocinar al vapor pescado con verduras",
+                "generada_por_llm": False,
+                "relevance_score": 5.0,
+                "tipo_preparacion": "vapor"
             }
         ]
 
-        return recetas_basicas
+        return recetas_emergencia.get(condicion, recetas_default)
 
     def _obtener_alimentos_fallback(self, condiciones: List[str]) -> List[str]:
-        """Método fallback para obtener alimentos si el sistema RAG falla."""
+        """Alimentos fallback específicos por condición."""
         condicion_principal = condiciones[0].lower() if condiciones else "general"
 
-        if condicion_principal == "anemia":
-            return ["pescado", "quinua", "lentejas", "espinaca", "hígado"]
-        elif condicion_principal == "sobrepeso":
-            return ["verduras", "frutas", "pescado magro", "cereales integrales"]
-        else:
-            return ["pescado", "quinua", "verduras", "frutas", "legumbres"]
+        alimentos_fallback = {
+            "anemia": ["Pescado", "Quinua", "Lentejas", "Espinaca", "Hígado de pollo", "Anchoveta"],
+            "sobrepeso": ["Verduras de hoja verde", "Frutas frescas", "Pescado magro", "Cereales integrales", "Brócoli"],
+            "diabetes": ["Verduras", "Pescado", "Quinua", "Legumbres", "Cereales integrales"],
+            "general": ["Pescado", "Quinua", "Verduras variadas", "Frutas de estación", "Legumbres"]
+        }
+
+        return alimentos_fallback.get(condicion_principal, alimentos_fallback["general"])
 
     def _generar_explicacion_fallback(self, condicion: str, recetas: List[str]) -> str:
-        """Explicación de fallback sin LLM."""
-        if condicion == "anemia":
-            return (
-                f"Este plan nutricional prioriza alimentos ricos en hierro como {', '.join(recetas[:2])}. "
-                "El hierro presente en pescados y legumbres ayuda a mejorar los niveles de hemoglobina. "
-                "Se recomienda combinar con alimentos ricos en vitamina C para mejorar la absorción."
-            )
-        elif condicion == "sobrepeso":
-            return (
-                f"Las recetas seleccionadas ({', '.join(recetas[:2])}) son opciones nutritivas y balanceadas "
-                "con control calórico. Priorizan proteínas magras, verduras y preparaciones saludables "
-                "que ayudan a mantener un peso adecuado mientras aportan nutrientes esenciales."
-            )
-        else:
-            return (
-                f"Este plan incluye recetas variadas ({', '.join(recetas[:2])}) que aportan "
-                "los nutrientes necesarios para el crecimiento y desarrollo durante la adolescencia, "
-                "considerando las preferencias de la cocina peruana."
-            )
+        """Explicación fallback mejorada."""
+        recetas_str = ', '.join(recetas[:2]) if recetas else "las recetas seleccionadas"
+
+        explicaciones = {
+            "anemia": f"Este plan nutricional prioriza alimentos ricos en hierro como {recetas_str}. "
+                     "El hierro presente en pescados, quinua y legumbres ayuda a mejorar los niveles de hemoglobina. "
+                     "Se recomienda combinar con alimentos ricos en vitamina C para optimizar la absorción del hierro. "
+                     "Este plan está diseñado específicamente para adolescentes con anemia ferropénica.",
+
+            "sobrepeso": f"Las recetas seleccionadas ({recetas_str}) son opciones nutritivas con control calórico. "
+                        "Priorizan proteínas magras, verduras y preparaciones saludables que contribuyen al control del peso "
+                        "mientras aportan los nutrientes esenciales para el crecimiento adolescente. "
+                        "Se enfoca en la saciedad y el valor nutricional.",
+
+            "general": f"Este plan incluye recetas variadas ({recetas_str}) que aportan los nutrientes necesarios "
+                      "para el crecimiento y desarrollo durante la adolescencia. Las recetas están adaptadas a "
+                      "ingredientes peruanos y preferencias locales, asegurando un aporte nutricional balanceado."
+        }
+
+        return explicaciones.get(condicion, explicaciones["general"])
 
     def _generar_consejos_fallback(self, condicion: str) -> str:
-        """Consejos de fallback sin LLM."""
+        """Consejos fallback específicos por condición."""
         consejos_base = [
-            "Mantén horarios regulares de comida (desayuno, almuerzo, cena y un refrigerio).",
-            "Consume al menos 8 vasos de agua al día.",
-            "Incluye variedad de colores en tus comidas (frutas y verduras).",
-            "Evita el exceso de azúcar y alimentos ultraprocesados."
+            "Mantén horarios regulares de comida (desayuno, almuerzo, cena y refrigerio saludable).",
+            "Consume al menos 8 vasos de agua al día para mantener una hidratación adecuada.",
+            "Incluye variedad de colores en tus comidas a través de frutas y verduras frescas."
         ]
 
-        if condicion == "anemia":
-            consejos_base.append("Combina alimentos ricos en hierro con cítricos para mejorar la absorción.")
-        elif condicion == "sobrepeso":
-            consejos_base.append("Practica actividad física regular y controla las porciones.")
+        consejos_especificos = {
+            "anemia": [
+                "Combina alimentos ricos en hierro con frutas cítricas para mejorar la absorción.",
+                "Evita tomar té o café durante las comidas principales ya que pueden interferir con la absorción del hierro.",
+                "Incluye regularmente alimentos de origen animal ricos en hierro hemo."
+            ],
+            "sobrepeso": [
+                "Practica actividad física regular, al menos 60 minutos diarios.",
+                "Controla las porciones y come lentamente para reconocer las señales de saciedad.",
+                "Prefiere métodos de cocción saludables como al vapor, a la plancha o hervido."
+            ],
+            "general": [
+                "Mantén un equilibrio entre todos los grupos de alimentos.",
+                "Limita el consumo de alimentos ultraprocesados y azúcares añadidos.",
+                "Asegúrate de dormir entre 8-10 horas diarias para un desarrollo óptimo."
+            ]
+        }
 
-        return " ".join(consejos_base)
+        consejos_condicion = consejos_especificos.get(condicion, consejos_especificos["general"])
+        todos_consejos = consejos_base + consejos_condicion
+
+        return " ".join(todos_consejos)
+
+    def verificar_estado_sistema(self) -> Dict:
+        """Verifica el estado actual del sistema RAG."""
+        try:
+            estado = {
+                "sistema_inicializado": self.sistema_inicializado,
+                "ultimo_resultado_disponible": self.ultimo_resultado_rag is not None,
+                "timestamp": self._get_timestamp()
+            }
+
+            if self.sistema_inicializado:
+                # Verificar diversidad del sistema
+                verificacion_diversidad = verificar_diversidad_sistema()
+                estado["diversidad_sistema"] = verificacion_diversidad
+
+            return estado
+
+        except Exception as e:
+            return {
+                "error": str(e),
+                "sistema_inicializado": False,
+                "timestamp": self._get_timestamp()
+            }
+
+    def limpiar_cache_sistema(self):
+        """Limpia el cache del sistema para obtener nuevas recomendaciones."""
+        try:
+            if self.sistema_inicializado:
+                limpiar_cache_busquedas()
+                logger.info("🧹 Cache del sistema limpiado")
+            else:
+                logger.warning("⚠️ Sistema no inicializado, no se puede limpiar cache")
+        except Exception as e:
+            logger.error(f"❌ Error limpiando cache: {e}")
+
+    def _get_timestamp(self) -> str:
+        """Obtiene timestamp actual."""
+        from datetime import datetime
+        return datetime.now().isoformat()
 
 
-# Función de conveniencia para mantener compatibilidad
+# Función de conveniencia mejorada para mantener compatibilidad
 def generar_plan(perfil: dict) -> dict:
-    """Función wrapper para mantener compatibilidad con el código existente."""
-    planner = NutritionalPlanner()
+    """
+    Función wrapper mejorada que usa el sistema RAG sin templates.
+    Mantiene compatibilidad con el código existente.
+    """
+    planner = NutritionalPlannerFixed()
     return planner.generar_plan(perfil)
+
+def verificar_sistema_rag_mejorado() -> dict:
+    """Verifica el estado del sistema RAG mejorado."""
+    try:
+        planner = NutritionalPlannerFixed()
+        return planner.verificar_estado_sistema()
+    except Exception as e:
+        return {"error": str(e), "sistema_funcionando": False}
+
+def limpiar_cache_recomendaciones():
+    """Limpia el cache para obtener recomendaciones frescas."""
+    try:
+        planner = NutritionalPlannerFixed()
+        planner.limpiar_cache_sistema()
+    except Exception as e:
+        logger.error(f"Error limpiando cache: {e}")
+
+# Función de prueba para verificar funcionamiento
+def probar_sistema_completo():
+    """Función de prueba completa del sistema mejorado."""
+    print("🧪 PROBANDO SISTEMA RAG MEJORADO")
+    print("=" * 50)
+
+    # Perfiles de prueba
+    perfiles_prueba = [
+        {
+            "edad": 15,
+            "sexo": "femenino",
+            "peso": "55 kg",
+            "altura": "1.60 m",
+            "condiciones": ["anemia"]
+        },
+        {
+            "edad": 16,
+            "sexo": "masculino",
+            "peso": "70 kg",
+            "altura": "1.70 m",
+            "condiciones": ["sobrepeso"]
+        }
+    ]
+
+    try:
+        planner = NutritionalPlannerFixed()
+
+        # Verificar estado inicial
+        estado = planner.verificar_estado_sistema()
+        print(f"📊 Estado del sistema: {estado}")
+
+        # Probar con cada perfil
+        for i, perfil in enumerate(perfiles_prueba, 1):
+            print(f"\n--- PRUEBA {i}: {perfil['condiciones'][0].upper()} ---")
+
+            resultado = planner.generar_plan(perfil)
+
+            if "error" in resultado:
+                print(f"❌ Error: {resultado['error']}")
+            else:
+                metricas = resultado.get("metricas_sistema", {})
+                print(f"✅ Plan generado:")
+                print(f"   - Recetas: {metricas.get('recetas_seleccionadas', 0)}")
+                print(f"   - Alimentos: {metricas.get('total_alimentos_recomendados', 0)}")
+                print(f"   - Sistema RAG usado: {metricas.get('sistema_rag_usado', False)}")
+                print(f"   - Recetas IA: {metricas.get('recetas_ia_count', 0)}")
+                print(f"   - Diversidad alimentos: {metricas.get('diversidad_alimentos', 0)}")
+
+        print(f"\n🎉 Prueba completada")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error en prueba: {e}")
+        return False
+
+if __name__ == "__main__":
+    probar_sistema_completo()

@@ -293,7 +293,7 @@ with st.sidebar:
                     response = requests.post(
                         f"{API_BASE_URL}/generate_plan",
                         json=st.session_state.user_profile,
-                        timeout=30
+                        timeout=120  # 2 minutos para procesos largos
                     )
 
                     if response.status_code == 200:
@@ -543,3 +543,14 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
+# Footer
+st.markdown("""
+---
+<div style="text-align: center; color: var(--text-color); font-size: 0.9rem; margin-top: 2rem;">
+    <p>💚 Desarrollado con amor para la salud de los adolescentes peruanos</p>
+    <p>🏥 Basado en guías del Ministerio de Salud del Perú y la OMS</p>
+    <p style="font-size: 0.8rem; opacity: 0.7;">
+        © 2024 NutriPlan AI - Universidad Nacional de San Agustín
+    </p>
+</div>
+""", unsafe_allow_html=True)
