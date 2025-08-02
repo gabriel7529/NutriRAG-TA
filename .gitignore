@@ -36,15 +36,17 @@ ehthumbs.db
 
 # Environment variables
 .env
-.env.*
+
 !/.env.example # Keep .env.example if you provide one
 
 # Uploaded files or generated data
 /uploads/
-/data/
+
 /models/ # If models are large and trained locally, consider ignoring them
 /dist/
 /build/
+*.csv
+/data/chroma_index
 
 # IDE-specific files for PyCharm, VS Code, etc.
 .idea/
